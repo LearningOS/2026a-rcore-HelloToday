@@ -1,0 +1,20 @@
+{
+  "schema": 1,
+  "courseId": 2073,
+  "repository": "LearningOS/2026a-rcore-HelloToday",
+  "user": "HelloToday",
+  "totalScore": 500,
+  "chapters": {
+    "ch3": {
+      "points": "7/7",
+      "score": 100,
+      "commit": "946ed04d41a36f9bd8acb82f26d3d28bfc1959a0"
+    }
+  },
+  "score": 100,
+  "upload": {
+    "status": "pending",
+    "runId": "40100158306",
+    "runAttempt": "1"
+  }
+}
