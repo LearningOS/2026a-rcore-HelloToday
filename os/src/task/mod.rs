@@ -24,6 +24,8 @@ pub use task::{TaskControlBlock, TaskStatus};
 
 pub use context::TaskContext;
 
+use crate::mm::{MapPermission, VirtAddr};
+
 /// The task manager, where all the tasks are managed.
 ///
 /// Functions implemented on `TaskManager` deals with all task state transitions
@@ -126,6 +128,22 @@ impl TaskManager {
         inner.tasks[inner.current_task].get_trap_cx()
     }
 
+    fn mmap_current(&self, start: usize, end: usize, permission: MapPermission) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        inner.tasks[current]
+                .memory_set
+                .insert_framed_area_if_free(VirtAddr::from(start), VirtAddr::from(end), permission)
+    }
+
+    fn munmap_current(&self, start: usize, end: usize) -> bool {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        inner.tasks[current].memory_set.remove_framed_area_if_mapped(VirtAddr::from(start), VirtAddr::from(end))
+    }
+
     /// Change the current 'Running' task's program break
     pub fn change_current_program_brk(&self, size: i32) -> Option<usize> {
         let mut inner = self.inner.exclusive_access();
@@ -152,6 +170,21 @@ impl TaskManager {
         } else {
             panic!("All applications completed!");
         }
+    }
+    /// Increase the current task's count for a syscall.    
+    fn increase_current_syscall_count(&self, syscall_id: usize)
+    {
+        let mut inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+
+        inner.tasks[current].syscall_times[syscall_id] += 1;
+    }
+
+    fn get_current_syscall_count(&self, syscall_id:usize) -> usize
+    {
+        let inner = self.inner.exclusive_access();
+        let current = inner.current_task;
+        inner.tasks[current].syscall_times[syscall_id]
     }
 }
 
@@ -188,6 +221,16 @@ pub fn exit_current_and_run_next() {
     run_next_task();
 }
 
+///在当前运行的任务地址空间中映射一段虚拟内存
+pub fn mmap_current_task(start: usize, end: usize, permission: MapPermission) -> bool {
+    TASK_MANAGER.mmap_current(start, end, permission)
+}
+
+///取消当前任务指定虚拟地址区间的映射
+pub fn munmap_current_task(start: usize, end: usize) -> bool {
+    TASK_MANAGER.munmap_current(start, end)
+}
+
 /// Get the current 'Running' task's token.
 pub fn current_user_token() -> usize {
     TASK_MANAGER.get_current_token()
@@ -202,3 +245,16 @@ pub fn current_trap_cx() -> &'static mut TrapContext {
 pub fn change_program_brk(size: i32) -> Option<usize> {
     TASK_MANAGER.change_current_program_brk(size)
 }
+
+/// Increase the current task's count for a syscall.
+pub fn increase_current_syscall_count(syscall_id: usize)
+{
+    TASK_MANAGER.increase_current_syscall_count(syscall_id);
+}
+
+/// Return the current task's count for a syscall.
+pub fn get_current_syscall_count(syscall_id: usize) -> usize
+{
+    TASK_MANAGER.get_current_syscall_count(syscall_id)
+}
+

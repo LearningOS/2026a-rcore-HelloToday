@@ -262,7 +262,52 @@ impl MemorySet {
             false
         }
     }
+    ///如果目标虚拟地址范围内没有被占用，则分配虚拟内存区域
+    pub fn insert_framed_area_if_free(&mut self, start_va:VirtAddr, end_va: VirtAddr, permission: MapPermission) -> bool
+    {
+        let map_area = MapArea::new(start_va, end_va, MapType::Framed, permission);
+
+        for vpn in map_area.vpn_range {
+            if let Some(pte) = self.page_table.translate(vpn) {
+                if pte.is_valid() {
+                    return false;
+                }
+            }
+        }
+        self.push(map_area, None);
+        true
+    }
+
+    ///当目标区间已经完整映射时，取消映射并回收对应物理页。
+    pub fn remove_framed_area_if_mapped(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.page_table.translate(vpn) {
+                Some(pte) if pte.is_valid() && pte.user_accessible() => {}
+                _ => return false
+            }
+        }
+        let area_index = self.areas.iter().position(|area| {
+            area.vpn_range.get_start() == start_vpn
+            && area.vpn_range.get_end() == end_vpn
+            && area.map_type == MapType::Framed
+        });
+
+        match area_index {
+            Some(index) => {
+                let mut area = self.areas.remove(index);
+
+                area.unmap(&mut self.page_table);
+                true
+            }
+            None => false
+        }
+    }
 }
+
+
 /// map area structure, controls a contiguous piece of virtual memory
 pub struct MapArea {
     vpn_range: VPNRange,
