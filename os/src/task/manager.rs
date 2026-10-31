@@ -4,7 +4,14 @@ use crate::sync::UPSafeCell;
 use alloc::collections::VecDeque;
 use alloc::sync::Arc;
 use lazy_static::*;
-///A array of `TaskControlBlock` that is thread-safe
+
+///按照环形证书顺序判断left是否位于right之前
+fn stride_less(left: usize, right: usize) -> bool {
+    (left.wrapping_sub(right) as isize) < 0
+}
+
+
+///A array of `TaskControlBlock` that is thread-saf
 pub struct TaskManager {
     ready_queue: VecDeque<Arc<TaskControlBlock>>,
 }
@@ -23,7 +30,24 @@ impl TaskManager {
     }
     /// Take a process out of the ready queue
     pub fn fetch(&mut self) -> Option<Arc<TaskControlBlock>> {
-        self.ready_queue.pop_front()
+        if self.ready_queue.is_empty(){
+            return None;
+        }
+
+        let mut min_index = 0;
+
+        for index in 1..self.ready_queue.len() {
+            let current_stride = self.ready_queue[index].get_stride();
+            let min_stride = self.ready_queue[min_index].get_stride();
+
+            if stride_less(current_stride, min_stride) {
+                min_index = index;
+            }
+        }
+
+        let task = self.ready_queue.remove(min_index).unwrap();
+        task.increase_stride();
+        Some(task)
     }
 }
 

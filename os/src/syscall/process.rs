@@ -10,6 +10,13 @@ use crate::{
     },
 };
 
+use core::{mem::size_of, slice};
+
+use crate::mm::translated_byte_buffer;
+
+use crate::timer::get_time_us;
+
+use crate::mm::{VirtAddr,MapPermission};
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
@@ -105,30 +112,107 @@ pub fn sys_waitpid(pid: isize, exit_code_ptr: *mut i32) -> isize {
 /// YOUR JOB: get time with second and microsecond
 /// HINT: You might reimplement it with virtual memory management.
 /// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let us = get_time_us();
+
+    let time_val = TimeVal {
+        sec: us /1_000_000,
+        usec: us % 1_000_000
+    };
+
+    let source = unsafe {
+        slice::from_raw_parts(&time_val as *const TimeVal as *const u8, size_of::<TimeVal>())
+    };
+
+    let buffers = translated_byte_buffer(current_user_token(), ts as *const u8, size_of::<TimeVal>());
+
+    let mut offset = 0;
+    for destination in buffers {
+        let end = offset + destination.len();
+        destination.copy_from_slice(&source[offset..end]);
+        offset = end;
+    }
+
+    0
 }
 
 /// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let start_va = VirtAddr::from(start);
+
+    if !start_va.aligned() {
+        return -1;
+    }
+    if port & !0x7 != 0 {
+        return -1;
+    }
+    if port & 0x7 == 0 {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+
+    let end = match start.checked_add(len) {
+        Some(end) => end,
+        _ => return -1
+    };
+
+    let mut permission = MapPermission::U;
+
+    if port & 0x1 != 0 {
+        permission |= MapPermission::R;
+    }
+    if port & 0x2 != 0 {
+        permission |= MapPermission::W;
+    }
+    if port & 0x4 != 0 {
+        permission |= MapPermission::X;
+    }    
+
+    let task = current_task().unwrap();
+    if task.mmap(start, end, permission) {
+        0
+    }
+    else
+    {
+        -1
+    }
 }
 
 /// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
         "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+    let start_va = VirtAddr::from(start);
+    if !start_va.aligned() {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let end = match start.checked_add(len) {
+        Some(end) => end,
+        None => return -1
+    };
+    let task = current_task().unwrap();
+    if task.munmap(start, end) {
+        0
+    }
+    else
+    {
+        -1
+    }
 }
 
 /// change data segment size
@@ -143,19 +227,36 @@ pub fn sys_sbrk(size: i32) -> isize {
 
 /// YOUR JOB: Implement spawn.
 /// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
         "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(elf_data) = get_app_data_by_name(path.as_str()) {
+        let parent = current_task().unwrap();
+
+        let child = parent.spawn(elf_data);
+        let child_pid = child.getpid();
+
+        add_task(child);
+
+        child_pid as isize
+    }
+    else 
+    {
+        -1
+    }
 }
 
 // YOUR JOB: Set task priority.
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
         "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
         current_task().unwrap().pid.0
     );
-    -1
+
+    current_task().unwrap().set_priority(prio)
 }

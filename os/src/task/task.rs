@@ -9,6 +9,10 @@ use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
 use core::cell::RefMut;
 
+use crate::mm::MapPermission;
+
+const BIG_STRIDE: usize = usize::MAX;
+
 /// Task control block structure
 ///
 /// Directly save the contents that will not change during running
@@ -68,6 +72,12 @@ pub struct TaskControlBlockInner {
 
     /// Program break
     pub program_brk: usize,
+
+    /// 当前进程的调度优先级
+    pub priority: usize,
+
+    ///当前进程累计的调度步长
+    pub stride: usize,
 }
 
 impl TaskControlBlockInner {
@@ -118,6 +128,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
+                    priority: 16,
+                    stride: 0,
                 })
             },
         };
@@ -131,6 +143,15 @@ impl TaskControlBlock {
             trap_handler as usize,
         );
         task_control_block
+    }
+
+    ///根据 ELF 数据创建当前进程的子进程
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let child = Arc::new(Self::new(elf_data));
+        child.inner_exclusive_access().parent = Some(Arc::downgrade(self));
+
+        self.inner_exclusive_access().children.push(child.clone());
+        child
     }
 
     /// Load a new elf to replace the original application address space and start execution
@@ -191,6 +212,8 @@ impl TaskControlBlock {
                     exit_code: 0,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
+                    priority: parent_inner.priority,
+                    stride: 0,
                 })
             },
         });
@@ -236,6 +259,42 @@ impl TaskControlBlock {
             None
         }
     }
+
+    ///在当前进程地址空间的空闲区间中建立按帧映射
+    pub fn mmap(&self, start: usize, end: usize, permission: MapPermission) -> bool {
+        let mut inner = self.inner_exclusive_access();
+
+        inner.memory_set.insert_framed_area_if_free(VirtAddr::from(start), VirtAddr::from(end), permission)
+    }
+
+     ///解除当前进程地址空间中的按帧映射
+     pub fn munmap(&self, start: usize, end:usize) -> bool {
+        let mut inner = self.inner_exclusive_access();
+        inner.memory_set.remove_framed_area_if_mapped(VirtAddr::from(start), VirtAddr::from(end))
+     }
+
+     /// 设置当前进程的调度优先级
+     pub fn set_priority(&self, priority: isize) -> isize {
+        if priority < 2 {
+            return -1;
+        }
+        self.inner_exclusive_access().priority = priority as usize;
+        priority
+     }
+
+     ///获取当前进程累计的调度步长
+     pub fn get_stride(&self) -> usize {
+        self.inner_exclusive_access().stride
+     }
+
+     ///当前进程获得一次调度后，增加其调度步长
+     pub fn increase_stride(&self) {
+        let mut inner = self.inner_exclusive_access();
+        let pass = BIG_STRIDE / inner.priority;
+
+        inner.stride = inner.stride.wrapping_add(pass);
+     }
+
 }
 
 #[derive(Copy, Clone, PartialEq)]
