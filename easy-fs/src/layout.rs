@@ -85,6 +85,7 @@ pub struct DiskInode {
     pub direct: [u32; INODE_DIRECT_COUNT],
     pub indirect1: u32,
     pub indirect2: u32,
+    nlink: u32,
     type_: DiskInodeType,
 }
 
@@ -96,6 +97,7 @@ impl DiskInode {
         self.direct.iter_mut().for_each(|v| *v = 0);
         self.indirect1 = 0;
         self.indirect2 = 0;
+        self.nlink = 1;
         self.type_ = type_;
     }
     /// Whether this inode is a directory
@@ -107,6 +109,25 @@ impl DiskInode {
     pub fn is_file(&self) -> bool {
         self.type_ == DiskInodeType::File
     }
+
+    ///返回指向当前inode的硬件链接数量
+    pub fn nlink(&self) -> u32 {
+        self.nlink
+    }
+    ///增加当前inode的硬链接数量，并返回增加后的数量
+    pub fn increase_nlink(&mut self) -> u32 {
+        self.nlink = self.nlink.checked_add(1).expect("inode link count overflow");
+        self.nlink
+    }
+
+    ///减少当前inode的硬链接数量，并返回减少后的数量
+    pub fn decrease_nlink(&mut self) -> u32 {
+        assert!(self.nlink > 0, "inode link count underflow");
+        self.nlink -= 1;
+        self.nlink
+    }
+
+
     /// Return block number correspond to size.
     pub fn data_blocks(&self) -> u32 {
         Self::_data_blocks(self.size)
