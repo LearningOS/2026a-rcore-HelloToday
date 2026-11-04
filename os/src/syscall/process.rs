@@ -235,10 +235,11 @@ pub fn sys_spawn(path: *const u8) -> isize {
 
     let token = current_user_token();
     let path = translated_str(token, path);
-    if let Some(elf_data) = get_app_data_by_name(path.as_str()) {
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let elf_data = app_inode.read_all();
         let parent = current_task().unwrap();
 
-        let child = parent.spawn(elf_data);
+        let child = parent.spawn(elf_data.as_slice());
         let child_pid = child.getpid();
 
         add_task(child);
