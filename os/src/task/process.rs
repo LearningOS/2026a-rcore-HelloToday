@@ -49,6 +49,20 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    ///当前进程是否启用了死锁检测
+    pub deadlock_detect_enabled: bool,
+    ///各个mutex当前可用的资源数量
+    pub mutex_available: Vec<usize>,
+    ///各线程已经持有的mutex数量
+    pub mutex_allocation: Vec<Vec<usize>>,
+    ///各线程当前还在申请的mutex数量
+    pub mutex_need: Vec<Vec<usize>>,
+    ///各个semaphore当前可用的资源数量
+    pub semaphore_available: Vec<usize>,
+    ///各线程已经持有semaphore的资源数量
+    pub semaphore_allocation: Vec<Vec<usize>>,
+    ///各线程当前还在申请的semaphore资源数量
+    pub semaphore_need: Vec<Vec<usize>>,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +95,113 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+
+    ///为线程初始化mutex和semaphore资源记录
+    pub fn init_thread_resources(&mut self, tid: usize) {
+        let mutex_count = self.mutex_available.len();
+        let semaphore_count = self.semaphore_available.len();
+
+        while self.mutex_allocation.len() <= tid {
+            self.mutex_allocation.push(vec![0; mutex_count]);
+            self.mutex_need.push(vec![0; mutex_count]);
+        }
+        while self.semaphore_allocation.len() <= tid {
+            self.semaphore_allocation
+                .push(vec![0; semaphore_count]);
+            self.semaphore_need.push(vec![0; semaphore_count]);
+        }
+
+        self.mutex_allocation[tid] = vec![0; mutex_count];
+        self.mutex_need[tid] = vec![0; mutex_count];
+        self.semaphore_allocation[tid] = vec![0; semaphore_count];
+        self.semaphore_need[tid] = vec![0; semaphore_count];
+    }
+
+    ///为新创建的mutex初始化资源记录
+    pub fn init_mutex_resource(&mut self, mutex_id: usize) {
+        let required_len = mutex_id + 1;
+        if self.mutex_available.len() < required_len {
+            self.mutex_available.resize(required_len, 0);
+        }
+        self.mutex_available[mutex_id] = 1;
+
+        let mutex_count = self.mutex_available.len();
+        for allocation in self.mutex_allocation.iter_mut() {
+            allocation.resize(mutex_count, 0);
+            allocation[mutex_id] = 0;
+        }
+        for need in self.mutex_need.iter_mut() {
+            need.resize(mutex_count, 0);
+            need[mutex_id] = 0;
+        }
+    }
+
+    ///为新创建或重新使用的semaphore初始化资源记录
+    pub fn init_semaphore_resource(&mut self, semaphore_id: usize, res_count: usize) {
+        let required_len = semaphore_id + 1;
+        if self.semaphore_available.len() < required_len {
+            self.semaphore_available.resize(required_len, 0);
+        }
+        self.semaphore_available[semaphore_id] = res_count;
+
+        let semaphore_count = self.semaphore_available.len();
+        for allocation in self.semaphore_allocation.iter_mut() {
+            allocation.resize(semaphore_count, 0);
+            allocation[semaphore_id] = 0;
+        }
+        for need in self.semaphore_need.iter_mut() {
+            need.resize(semaphore_count, 0);
+            need[semaphore_id] = 0;
+        }
+    }
+
+    ///判断给定的资源分配状态是否安全
+    fn is_safe(available: &[usize], allocation: &[Vec<usize>], need: &[Vec<usize>]) -> bool {
+        let thread_count = allocation.len();
+        let resource_count = available.len();
+        let mut work = available.to_vec();
+        let mut finish = vec![false; thread_count];
+
+        loop {
+            let mut found = false;
+            for tid in 0..thread_count {
+                if finish[tid] {
+                    continue;
+                }
+                let can_finish = (0..resource_count).all(|rid| need[tid][rid] <= work[rid]);
+                if can_finish {
+                    for rid in 0..resource_count {
+                        work[rid] += allocation[tid][rid];
+                    }
+                    finish[tid] = true;
+                    found = true;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+
+        finish.iter().all(|finished| *finished)
+    }
+
+    ///判断当前mutex资源分配状态是否安全
+    pub fn mutex_is_safe(&self) -> bool {
+        Self::is_safe(
+            &self.mutex_available,
+            &self.mutex_allocation,
+            &self.mutex_need,
+        )
+    }
+
+    ///判断当前semaphore资源分配状态是否安全
+    pub fn semaphore_is_safe(&self) -> bool {
+        Self::is_safe(
+            &self.semaphore_available,
+            &self.semaphore_allocation,
+            &self.semaphore_need,
+        )
     }
 }
 
@@ -119,6 +240,13 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_available: Vec::new(),
+                    mutex_allocation: vec![Vec::new()],
+                    mutex_need: vec![Vec::new()],
+                    semaphore_available: Vec::new(),
+                    semaphore_allocation: vec![Vec::new()],
+                    semaphore_need: vec![Vec::new()],
                 })
             },
         });
@@ -161,7 +289,25 @@ impl ProcessControlBlock {
         let new_token = memory_set.token();
         // substitute memory_set
         trace!("kernel: exec .. substitute memory_set");
-        self.inner_exclusive_access().memory_set = memory_set;
+        {
+            let mut process_inner = self.inner_exclusive_access();
+            //用新程序的地址空间替换旧地址空间
+            process_inner.memory_set = memory_set;
+            //exec 后新程序需要重新决定是否启用死锁检测
+            process_inner.deadlock_detect_enabled = false;
+            //旧程序创建的同步对象不应继续留给新程序使用
+            process_inner.mutex_list.clear();
+            process_inner.semaphore_list.clear();
+            process_inner.condvar_list.clear();
+            //清空旧程序的 mutex 资源账本，并保留主线程 T0 的空行
+            process_inner.mutex_available.clear();
+            process_inner.mutex_allocation = vec![Vec::new()];
+            process_inner.mutex_need = vec![Vec::new()];
+            //清空旧程序的 semaphore 资源账本，并保留主线程 T0 的空行
+            process_inner.semaphore_available.clear();
+            process_inner.semaphore_allocation = vec![Vec::new()];
+            process_inner.semaphore_need = vec![Vec::new()];
+        }
         // then we alloc user resource for main thread again
         // since memory_set has been changed
         trace!("kernel: exec .. alloc user resource for main thread again");
@@ -245,6 +391,13 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    deadlock_detect_enabled: false,
+                    mutex_available: Vec::new(),
+                    mutex_allocation: vec![Vec::new()],
+                    mutex_need: vec![Vec::new()],
+                    semaphore_available: Vec::new(),
+                    semaphore_allocation: vec![Vec::new()],
+                    semaphore_need: vec![Vec::new()],
                 })
             },
         });

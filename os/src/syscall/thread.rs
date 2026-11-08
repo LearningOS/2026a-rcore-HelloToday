@@ -33,10 +33,16 @@ pub fn sys_thread_create(entry: usize, arg: usize) -> isize {
     add_task(Arc::clone(&new_task));
     let new_task_inner = new_task.inner_exclusive_access();
     let new_task_res = new_task_inner.res.as_ref().unwrap();
+
     let new_task_tid = new_task_res.tid;
     let mut process_inner = process.inner_exclusive_access();
+
+    //为新线程增加或者重置资源矩阵中的对应行
+    process_inner.init_thread_resources(new_task_tid);
+
     // add new thread to current process
     let tasks = &mut process_inner.tasks;
+
     while tasks.len() < new_task_tid + 1 {
         tasks.push(None);
     }
